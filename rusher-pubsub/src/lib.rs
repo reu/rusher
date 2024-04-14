@@ -87,6 +87,16 @@ impl Broker {
             .unwrap_or(0)
     }
 
+    pub async fn subscriptions(&self) -> impl Iterator<Item = (String, usize)> {
+        self.subscribers
+            .lock()
+            .await
+            .iter()
+            .map(|(channel, count)| (channel.clone(), *count))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
     pub async fn publish(&self, channel: &str, msg: impl Serialize) -> Result<(), BoxError> {
         self.broadcast
             .send((channel.to_owned(), serde_json::to_vec(&msg)?))?;
@@ -126,16 +136,18 @@ impl Connection {
     }
 
     pub async fn subscribe(&mut self, channel: &str) -> Result<(), BoxError> {
-        self.subs.insert(channel.to_owned());
-        self.events
-            .send(ConnectionEvent::Subscribe(channel.to_owned()))?;
+        if self.subs.insert(channel.to_owned()) {
+            self.events
+                .send(ConnectionEvent::Subscribe(channel.to_owned()))?;
+        }
         Ok(())
     }
 
     pub async fn unsubscribe(&mut self, channel: &str) -> Result<(), BoxError> {
-        self.subs.remove(channel);
-        self.events
-            .send(ConnectionEvent::Unsubscribe(channel.to_owned()))?;
+        if self.subs.remove(channel) {
+            self.events
+                .send(ConnectionEvent::Unsubscribe(channel.to_owned()))?;
+        }
         Ok(())
     }
 

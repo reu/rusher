@@ -1,11 +1,14 @@
-use std::{collections::HashSet, env};
+use std::{
+    collections::{HashMap, HashSet},
+    env,
+};
 
 use anyhow::bail;
 use axum::{
     extract::{ws::Message, State, WebSocketUpgrade},
     http::StatusCode,
     response::IntoResponse,
-    routing::{any, post},
+    routing::{any, get, post},
     Json, Router,
 };
 use futures::{SinkExt, StreamExt};
@@ -28,6 +31,7 @@ async fn main() {
     let listener = TcpListener::bind(("0.0.0.0", port)).await.unwrap();
 
     let app = Router::new()
+        .route("/app/channels", get(list_channels))
         .route("/app", post(publish))
         .route("/app", any(handle_ws))
         .with_state(broker);
@@ -59,6 +63,25 @@ async fn publish(
         Ok(()) => Ok(Json(json!({ "ok": true }))),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
+}
+
+async fn list_channels(State(broker): State<Broker>) -> impl IntoResponse {
+    let channels = broker
+        .subscriptions()
+        .await
+        .filter(|(_, count)| *count > 0)
+        .map(|(channel, count)| {
+            (
+                channel,
+                json!({
+                    "subscription_count": count,
+                    "user_count": count,
+                }),
+            )
+        })
+        .collect::<HashMap<String, serde_json::Value>>();
+
+    Json(channels)
 }
 
 async fn handle_ws(State(broker): State<Broker>, ws: WebSocketUpgrade) -> impl IntoResponse {
