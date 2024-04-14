@@ -1,5 +1,5 @@
 [workspace]
 resolver = "2"
 members = [
-  "./rusher-pubsub",
+  "./rusher-pubsub", "rusher-core", "rusher-server",
 ]
