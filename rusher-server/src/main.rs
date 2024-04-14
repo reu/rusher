@@ -1,17 +1,19 @@
-use std::env;
+use std::{collections::HashSet, env};
 
 use anyhow::bail;
 use axum::{
     extract::{ws::Message, State, WebSocketUpgrade},
     http::StatusCode,
     response::IntoResponse,
-    routing::any,
-    Router,
+    routing::{any, post},
+    Json, Router,
 };
 use futures::{SinkExt, StreamExt};
 use rand::Rng;
-use rusher_core::{ClientEvent, ConnectionInfo, CustomEvent, ServerEvent};
+use rusher_core::{ChannelName, ClientEvent, ConnectionInfo, CustomEvent, ServerEvent, SocketId};
 use rusher_pubsub::Broker;
+use serde::Deserialize;
+use serde_json::json;
 use tokio::{net::TcpListener, sync::mpsc};
 
 #[tokio::main]
@@ -26,10 +28,37 @@ async fn main() {
     let listener = TcpListener::bind(("0.0.0.0", port)).await.unwrap();
 
     let app = Router::new()
+        .route("/app", post(publish))
         .route("/app", any(handle_ws))
         .with_state(broker);
 
     axum::serve(listener, app).await.unwrap();
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct EventPayload {
+    pub name: String,
+    pub data: String,
+    pub channels: Option<HashSet<ChannelName>>,
+    pub channel: Option<ChannelName>,
+    pub socket_id: Option<SocketId>,
+}
+
+async fn publish(
+    State(broker): State<Broker>,
+    Json(payload): Json<EventPayload>,
+) -> impl IntoResponse {
+    let channel = payload.channel.unwrap();
+    let event = ServerEvent::ChannelEvent(CustomEvent {
+        event: payload.name,
+        data: payload.data.into(),
+        channel: channel.to_owned(),
+        user_id: None,
+    });
+    match broker.publish(channel.as_ref(), event).await {
+        Ok(()) => Ok(Json(json!({ "ok": true }))),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
 }
 
 async fn handle_ws(State(broker): State<Broker>, ws: WebSocketUpgrade) -> impl IntoResponse {

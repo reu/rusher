@@ -86,6 +86,12 @@ impl Broker {
             .copied()
             .unwrap_or(0)
     }
+
+    pub async fn publish(&self, channel: &str, msg: impl Serialize) -> Result<(), BoxError> {
+        self.broadcast
+            .send((channel.to_owned(), serde_json::to_vec(&msg)?))?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
