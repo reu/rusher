@@ -1,17 +1,25 @@
-use std::{collections::HashSet, error::Error};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    mem,
+    sync::Arc,
+};
 
 use serde::{de::DeserializeOwned, Serialize};
-use tokio::sync::broadcast::{
-    self,
-    error::{RecvError, TryRecvError},
-    Receiver, Sender,
+use tokio::sync::{
+    broadcast::{
+        self,
+        error::{RecvError, TryRecvError},
+    },
+    mpsc, Mutex,
 };
 
 pub(crate) type BoxError = Box<dyn Error + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub struct Broker {
-    broadcast: Sender<(String, Vec<u8>)>,
+    broadcast: broadcast::Sender<(String, Vec<u8>)>,
+    subscribers: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 impl Default for Broker {
@@ -23,7 +31,10 @@ impl Default for Broker {
 impl Broker {
     pub fn with_capacity(capacity: usize) -> Self {
         let (sender, _) = broadcast::channel(capacity);
-        Self { broadcast: sender }
+        Self {
+            broadcast: sender,
+            subscribers: Default::default(),
+        }
     }
 }
 
@@ -31,19 +42,74 @@ impl Broker {
     pub async fn new_connection(&self) -> Result<Connection, BoxError> {
         let sender = self.broadcast.clone();
         let receiver = sender.subscribe();
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel::<ConnectionEvent>();
+
+        tokio::spawn({
+            let subscribers = self.subscribers.clone();
+            async move {
+                while let Some(event) = events_rx.recv().await {
+                    match event {
+                        ConnectionEvent::Subscribe(channel) => {
+                            subscribers
+                                .lock()
+                                .await
+                                .entry(channel)
+                                .and_modify(|count| *count += 1)
+                                .or_insert(1);
+                        }
+                        ConnectionEvent::Unsubscribe(channel) => {
+                            subscribers
+                                .lock()
+                                .await
+                                .entry(channel)
+                                .and_modify(|count| *count -= 1)
+                                .or_default();
+                        }
+                    }
+                }
+            }
+        });
+
         Ok(Connection {
             sender,
             receiver,
+            events: events_tx,
             subs: HashSet::new(),
         })
     }
+
+    pub async fn subscribers_count(&self, channel: &str) -> usize {
+        self.subscribers
+            .lock()
+            .await
+            .get(channel)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ConnectionEvent {
+    Subscribe(String),
+    Unsubscribe(String),
 }
 
 #[derive(Debug)]
 pub struct Connection {
-    sender: Sender<(String, Vec<u8>)>,
-    receiver: Receiver<(String, Vec<u8>)>,
+    sender: broadcast::Sender<(String, Vec<u8>)>,
+    receiver: broadcast::Receiver<(String, Vec<u8>)>,
+    events: mpsc::UnboundedSender<ConnectionEvent>,
     subs: HashSet<String>,
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        for channel in mem::take(&mut self.subs).into_iter() {
+            self.events
+                .send(ConnectionEvent::Unsubscribe(channel.to_owned()))
+                .ok();
+        }
+    }
 }
 
 impl Connection {
@@ -55,11 +121,15 @@ impl Connection {
 
     pub async fn subscribe(&mut self, channel: &str) -> Result<(), BoxError> {
         self.subs.insert(channel.to_owned());
+        self.events
+            .send(ConnectionEvent::Subscribe(channel.to_owned()))?;
         Ok(())
     }
 
     pub async fn unsubscribe(&mut self, channel: &str) -> Result<(), BoxError> {
         self.subs.remove(channel);
+        self.events
+            .send(ConnectionEvent::Unsubscribe(channel.to_owned()))?;
         Ok(())
     }
 
@@ -93,6 +163,8 @@ impl Connection {
 
 #[cfg(test)]
 mod test {
+    use tokio::time;
+
     use super::*;
 
     #[tokio::test]
@@ -151,5 +223,27 @@ mod test {
 
         assert_eq!("3", conn2.recv::<String>().await.unwrap());
         assert_eq!(None, conn1.try_recv::<String>().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_broker_subscribers_count() {
+        let mut interval = time::interval(time::Duration::from_millis(1));
+        let broker = Broker::default();
+        let mut conn1 = broker.new_connection().await.unwrap();
+        let mut conn2 = broker.new_connection().await.unwrap();
+
+        conn1.subscribe("channel1").await.unwrap();
+        conn1.subscribe("channel2").await.unwrap();
+        conn2.subscribe("channel1").await.unwrap();
+        interval.tick().await;
+
+        assert_eq!(0, broker.subscribers_count("channel0").await);
+        assert_eq!(2, broker.subscribers_count("channel1").await);
+        assert_eq!(1, broker.subscribers_count("channel2").await);
+
+        conn1.unsubscribe("channel1").await.unwrap();
+        interval.tick().await;
+
+        assert_eq!(1, broker.subscribers_count("channel1").await);
     }
 }
