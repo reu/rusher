@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::bail;
 use axum::{
+    body::Body,
     extract::{ws::Message, Path, Request, State, WebSocketUpgrade},
     http::StatusCode,
     middleware::{self, Next},
@@ -19,13 +20,10 @@ use rusher_core::{ChannelName, ClientEvent, ConnectionInfo, CustomEvent, ServerE
 use rusher_pubsub::Broker;
 use serde::Deserialize;
 use serde_json::json;
-use tokio::{
-    net::TcpListener,
-    sync::{mpsc, Mutex},
-};
+use tokio::{net::TcpListener, sync::mpsc};
 
-#[derive(Debug, Clone)]
-struct AppId(String);
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AppId(String);
 
 #[tokio::main]
 async fn main() {
@@ -34,34 +32,69 @@ async fn main() {
         .and_then(|port| port.parse::<u16>().ok())
         .unwrap_or(4444);
 
-    let brokers = Arc::new(Mutex::new(HashMap::default()));
+    let apps = env::var("APP")
+        .ok()
+        .map(|app| {
+            app.split(',')
+                .map(|app| app.trim())
+                .filter(|app| !app.is_empty())
+                .map(|app| app.to_owned())
+                .map(AppId)
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
 
     let listener = TcpListener::bind(("0.0.0.0", port)).await.unwrap();
 
-    let app = Router::new()
-        .route("/app/:app/channels", get(list_channels))
-        .route("/app/:app", post(publish))
-        .route("/app/:app", any(handle_ws))
-        .route_layer(middleware::from_fn_with_state(
-            brokers.clone(),
-            broker_middleware,
-        ));
+    let broker_repo = apps
+        .into_iter()
+        .map(|app| (app, Broker::default()))
+        .collect::<HashMap<AppId, Broker>>();
+
+    let app = app(broker_repo);
 
     axum::serve(listener, app).await.unwrap();
 }
 
+pub trait BrokerRepository: Send + Sync {
+    fn broker_for_app(&self, app_id: &AppId) -> Option<Broker>;
+}
+
+impl BrokerRepository for HashMap<AppId, Broker> {
+    fn broker_for_app(&self, app_id: &AppId) -> Option<Broker> {
+        self.get(app_id).cloned()
+    }
+}
+
+pub fn app<T: BrokerRepository + 'static>(broker_repo: T) -> Router {
+    Router::new()
+        .route("/app/:app/channels", get(list_channels))
+        .route("/app/:app", post(publish))
+        .route("/app/:app", any(handle_ws))
+        .route_layer(middleware::from_fn_with_state(
+            Arc::new(broker_repo) as Arc<dyn BrokerRepository>,
+            broker_middleware,
+        ))
+}
+
 async fn broker_middleware(
-    State(brokers): State<Arc<Mutex<HashMap<String, Broker>>>>,
+    State(broker_repo): State<Arc<dyn BrokerRepository>>,
     Path(app): Path<String>,
     mut request: Request,
     next: Next,
 ) -> Response {
-    let mut brokers = brokers.lock().await;
-    let broker = brokers.entry(app.clone()).or_default();
-    request.extensions_mut().insert(AppId(app));
-    request.extensions_mut().insert(broker.clone());
-    drop(brokers);
-    next.run(request).await
+    let app_id = AppId(app);
+    match broker_repo.broker_for_app(&app_id) {
+        Some(broker) => {
+            request.extensions_mut().insert(app_id);
+            request.extensions_mut().insert(broker);
+            next.run(request).await
+        }
+        None => Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::empty())
+            .unwrap(),
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
