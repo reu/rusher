@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::bail;
+use async_trait::async_trait;
 use axum::{
     body::Body,
     extract::{ws::Message, Path, Request, State, WebSocketUpgrade},
@@ -56,12 +57,14 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
+#[async_trait]
 pub trait BrokerRepository: Send + Sync {
-    fn broker_for_app(&self, app_id: &AppId) -> Option<Broker>;
+    async fn broker_for_app(&self, app_id: &AppId) -> Option<Broker>;
 }
 
+#[async_trait]
 impl BrokerRepository for HashMap<AppId, Broker> {
-    fn broker_for_app(&self, app_id: &AppId) -> Option<Broker> {
+    async fn broker_for_app(&self, app_id: &AppId) -> Option<Broker> {
         self.get(app_id).cloned()
     }
 }
@@ -84,7 +87,7 @@ async fn broker_middleware(
     next: Next,
 ) -> Response {
     let app_id = AppId(app);
-    match broker_repo.broker_for_app(&app_id) {
+    match broker_repo.broker_for_app(&app_id).await {
         Some(broker) => {
             request.extensions_mut().insert(app_id);
             request.extensions_mut().insert(broker);

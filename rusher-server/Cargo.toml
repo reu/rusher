@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.82"
+async-trait = "0.1.80"
 axum = { version = "0.7.5", features = ["http2", "ws"] }
 futures = "0.3.30"
 rand = "0.8.5"
