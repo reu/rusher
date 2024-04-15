@@ -1,15 +1,17 @@
 use std::{
     collections::{HashMap, HashSet},
     env,
+    sync::Arc,
 };
 
 use anyhow::bail;
 use axum::{
-    extract::{ws::Message, State, WebSocketUpgrade},
+    extract::{ws::Message, Path, Request, State, WebSocketUpgrade},
     http::StatusCode,
-    response::IntoResponse,
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{any, get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use futures::{SinkExt, StreamExt};
 use rand::Rng;
@@ -17,7 +19,13 @@ use rusher_core::{ChannelName, ClientEvent, ConnectionInfo, CustomEvent, ServerE
 use rusher_pubsub::Broker;
 use serde::Deserialize;
 use serde_json::json;
-use tokio::{net::TcpListener, sync::mpsc};
+use tokio::{
+    net::TcpListener,
+    sync::{mpsc, Mutex},
+};
+
+#[derive(Debug, Clone)]
+struct AppId(String);
 
 #[tokio::main]
 async fn main() {
@@ -26,17 +34,34 @@ async fn main() {
         .and_then(|port| port.parse::<u16>().ok())
         .unwrap_or(4444);
 
-    let broker = Broker::default();
+    let brokers = Arc::new(Mutex::new(HashMap::default()));
 
     let listener = TcpListener::bind(("0.0.0.0", port)).await.unwrap();
 
     let app = Router::new()
-        .route("/app/channels", get(list_channels))
-        .route("/app", post(publish))
-        .route("/app", any(handle_ws))
-        .with_state(broker);
+        .route("/app/:app/channels", get(list_channels))
+        .route("/app/:app", post(publish))
+        .route("/app/:app", any(handle_ws))
+        .route_layer(middleware::from_fn_with_state(
+            brokers.clone(),
+            broker_middleware,
+        ));
 
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn broker_middleware(
+    State(brokers): State<Arc<Mutex<HashMap<String, Broker>>>>,
+    Path(app): Path<String>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let mut brokers = brokers.lock().await;
+    let broker = brokers.entry(app.clone()).or_default();
+    request.extensions_mut().insert(AppId(app));
+    request.extensions_mut().insert(broker.clone());
+    drop(brokers);
+    next.run(request).await
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -49,7 +74,7 @@ pub struct EventPayload {
 }
 
 async fn publish(
-    State(broker): State<Broker>,
+    Extension(broker): Extension<Broker>,
     Json(payload): Json<EventPayload>,
 ) -> impl IntoResponse {
     let channel = payload.channel.unwrap();
@@ -65,7 +90,7 @@ async fn publish(
     }
 }
 
-async fn list_channels(State(broker): State<Broker>) -> impl IntoResponse {
+async fn list_channels(Extension(broker): Extension<Broker>) -> impl IntoResponse {
     let channels = broker
         .subscriptions()
         .await
@@ -84,7 +109,10 @@ async fn list_channels(State(broker): State<Broker>) -> impl IntoResponse {
     Json(channels)
 }
 
-async fn handle_ws(State(broker): State<Broker>, ws: WebSocketUpgrade) -> impl IntoResponse {
+async fn handle_ws(
+    Extension(broker): Extension<Broker>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
     match broker.new_connection().await {
         Ok(mut connection) => Ok(ws.on_upgrade(move |ws| async move {
             let socket_id = rand::thread_rng().gen();
