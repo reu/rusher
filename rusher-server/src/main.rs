@@ -18,7 +18,7 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use rand::Rng;
 use rusher_core::{ChannelName, ClientEvent, ConnectionInfo, CustomEvent, ServerEvent, SocketId};
-use rusher_pubsub::Broker;
+use rusher_pubsub::{AnyBroker, Broker, Connection};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::{net::TcpListener, sync::mpsc};
@@ -47,10 +47,20 @@ async fn main() {
 
     let listener = TcpListener::bind(("0.0.0.0", port)).await.unwrap();
 
-    let broker_repo = apps
-        .into_iter()
-        .map(|app| (app, Broker::default()))
-        .collect::<HashMap<AppId, Broker>>();
+    let broker_repo = match env::var("REDIS_URL") {
+        Ok(redis_url) => {
+            let mut repo = HashMap::new();
+            for app in apps {
+                let broker = AnyBroker::redis(&redis_url, &app.0).await.unwrap();
+                repo.insert(app, broker);
+            }
+            repo
+        }
+        _ => apps
+            .into_iter()
+            .map(|app| (app, AnyBroker::memory()))
+            .collect::<HashMap<AppId, AnyBroker>>(),
+    };
 
     let app = app(broker_repo);
 
@@ -59,12 +69,12 @@ async fn main() {
 
 #[async_trait]
 pub trait BrokerRepository: Send + Sync {
-    async fn broker_for_app(&self, app_id: &AppId) -> Option<Broker>;
+    async fn broker_for_app(&self, app_id: &AppId) -> Option<AnyBroker>;
 }
 
 #[async_trait]
-impl BrokerRepository for HashMap<AppId, Broker> {
-    async fn broker_for_app(&self, app_id: &AppId) -> Option<Broker> {
+impl BrokerRepository for HashMap<AppId, AnyBroker> {
+    async fn broker_for_app(&self, app_id: &AppId) -> Option<AnyBroker> {
         self.get(app_id).cloned()
     }
 }
@@ -110,7 +120,7 @@ pub struct EventPayload {
 }
 
 async fn publish(
-    Extension(broker): Extension<Broker>,
+    Extension(broker): Extension<AnyBroker>,
     Json(payload): Json<EventPayload>,
 ) -> impl IntoResponse {
     let channel = payload.channel.unwrap();
@@ -126,10 +136,11 @@ async fn publish(
     }
 }
 
-async fn list_channels(Extension(broker): Extension<Broker>) -> impl IntoResponse {
+async fn list_channels(Extension(broker): Extension<AnyBroker>) -> impl IntoResponse {
     let channels = broker
         .subscriptions()
         .await
+        .into_iter()
         .filter(|(_, count)| *count > 0)
         .map(|(channel, count)| {
             (
@@ -146,10 +157,10 @@ async fn list_channels(Extension(broker): Extension<Broker>) -> impl IntoRespons
 }
 
 async fn handle_ws(
-    Extension(broker): Extension<Broker>,
+    Extension(broker): Extension<AnyBroker>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    match broker.new_connection().await {
+    match broker.connect().await {
         Ok(mut connection) => Ok(ws.on_upgrade(move |ws| async move {
             let socket_id = rand::thread_rng().gen();
 
