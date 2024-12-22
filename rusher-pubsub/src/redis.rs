@@ -13,15 +13,22 @@ use super::{BoxError, Broker, Connection};
 #[derive(Debug, Clone)]
 pub struct RedisBroker {
     redis: RedisClient,
+    subscriber: RedisClient,
     namespace: Arc<String>,
 }
 
 impl RedisBroker {
     pub async fn from_url(url: &str, namespace: &str) -> Result<Self, BoxError> {
         let redis = RedisClient::new(RedisConfig::from_url(url)?, None, None, None);
+        let subscriber = redis.clone_new();
         redis.init().await?;
+        subscriber.init().await?;
+        subscriber
+            .psubscribe(format!("channels:{namespace}:msgs:*"))
+            .await?;
         Ok(Self {
             redis,
+            subscriber,
             namespace: Arc::new(namespace.to_string()),
         })
     }
@@ -31,16 +38,10 @@ impl Broker for RedisBroker {
     type Conn = RedisConnection;
 
     async fn connect(&self) -> Result<Self::Conn, BoxError> {
-        let publisher = self.redis.clone();
-        let subscriber = self.redis.clone_new();
-        publisher.init().await?;
-        subscriber.init().await?;
-        let msgs = subscriber.message_rx();
         Ok(RedisConnection {
             namespace: self.namespace.clone(),
-            publisher,
-            subscriber,
-            msgs,
+            publisher: self.redis.clone(),
+            msgs: self.subscriber.message_rx(),
             subs: HashSet::default(),
         })
     }
@@ -65,7 +66,10 @@ impl Broker for RedisBroker {
 
     async fn publish(&self, channel: &str, msg: impl Serialize) -> Result<(), BoxError> {
         self.redis
-            .publish::<(), _, _>(channel.to_owned(), serde_json::to_string(&msg)?)
+            .publish::<(), _, _>(
+                format!("channels:{}:msgs:{channel}", self.namespace),
+                serde_json::to_string(&msg)?,
+            )
             .await?;
         Ok(())
     }
@@ -75,7 +79,6 @@ impl Broker for RedisBroker {
 pub struct RedisConnection {
     namespace: Arc<String>,
     publisher: RedisClient,
-    subscriber: RedisClient,
     msgs: RedisReceiver<RedisMessage>,
     subs: HashSet<String>,
 }
@@ -83,13 +86,15 @@ pub struct RedisConnection {
 impl Connection for RedisConnection {
     async fn publish(&mut self, channel: &str, msg: impl Serialize) -> Result<(), BoxError> {
         self.publisher
-            .publish::<(), _, _>(channel.to_owned(), serde_json::to_string(&msg)?)
+            .publish::<(), _, _>(
+                format!("channels:{}:msgs:{channel}", self.namespace),
+                serde_json::to_string(&msg)?,
+            )
             .await?;
         Ok(())
     }
 
     async fn subscribe(&mut self, channel: &str) -> Result<(), BoxError> {
-        self.subscriber.subscribe(channel).await?;
         self.publisher
             .hincrby::<(), _, _>(format!("subs:{}", self.namespace), channel, 1)
             .await?;
@@ -98,7 +103,6 @@ impl Connection for RedisConnection {
     }
 
     async fn unsubscribe(&mut self, channel: &str) -> Result<(), BoxError> {
-        self.subscriber.unsubscribe(channel).await?;
         self.publisher
             .hincrby::<(), _, _>(format!("subs:{}", self.namespace), channel, -1)
             .await?;
@@ -107,16 +111,26 @@ impl Connection for RedisConnection {
     }
 
     async fn recv<T: DeserializeOwned>(&mut self) -> Result<T, BoxError> {
-        let msg = self.msgs.recv().await?;
-        let msg = msg.value.as_str().ok_or::<&str>("Invalid message")?;
-        let msg = serde_json::from_str(msg.borrow())?;
-        Ok(msg)
+        let namespace = self.namespace.as_str();
+        loop {
+            let msg = self.msgs.recv().await?;
+            if self.subs.contains(&channel_name(&msg)) && namespace == channel_namespace(&msg) {
+                let msg = msg.value.as_str().ok_or::<&str>("Invalid message")?;
+                let msg = serde_json::from_str(msg.borrow())?;
+                return Ok(msg);
+            }
+        }
     }
 
     async fn try_recv<T: DeserializeOwned>(&mut self) -> Result<Option<T>, BoxError> {
+        let namespace = self.namespace.as_str();
         loop {
             match self.msgs.try_recv() {
-                Ok(msg) if msg.value.as_str().is_some() => {
+                Ok(msg)
+                    if msg.value.as_str().is_some()
+                        && self.subs.contains(&channel_name(&msg))
+                        && namespace == channel_namespace(&msg) =>
+                {
                     match serde_json::from_str(&msg.value.as_str().unwrap()) {
                         Ok(msg) => return Ok(Some(msg)),
                         _ => return Ok(None),
@@ -147,34 +161,55 @@ impl Drop for RedisConnection {
     }
 }
 
+fn channel_name(msg: &RedisMessage) -> String {
+    msg.channel
+        .split(':')
+        .map(|part| part.to_owned())
+        .last()
+        .unwrap_or_default()
+}
+
+fn channel_namespace(msg: &RedisMessage) -> String {
+    msg.channel
+        .split(':')
+        .map(|part| part.to_owned())
+        .nth(1)
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod test {
     use std::env;
 
-    use testcontainers::{core::WaitFor, runners::AsyncRunner, GenericImage};
+    use testcontainers::{core::WaitFor, runners::AsyncRunner, ContainerAsync, GenericImage};
     use tokio::time;
 
     use super::*;
 
-    #[tokio::test]
-    async fn test_pubsub() {
+    async fn create_redis_container() -> ContainerAsync<GenericImage> {
         env::set_var("TESTCONTAINERS", "remove");
-
-        let container = GenericImage::new("redis", "latest")
+        GenericImage::new("redis", "latest")
             .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
             .start()
-            .await;
+            .await
+    }
 
-        let broker = {
-            let port = container.get_host_port_ipv4(6379).await;
-            RedisBroker::from_url(&format!("redis://localhost:{port}/1"), "test")
-                .await
-                .unwrap()
-        };
+    async fn create_broker(container: &ContainerAsync<GenericImage>) -> RedisBroker {
+        let port = container.get_host_port_ipv4(6379).await;
+        RedisBroker::from_url(&format!("redis://localhost:{port}/1"), "test")
+            .await
+            .unwrap()
+    }
 
-        let mut conn1 = broker.connect().await.unwrap();
-        let mut conn2 = broker.connect().await.unwrap();
-        let mut conn3 = broker.connect().await.unwrap();
+    #[tokio::test]
+    async fn test_pubsub() {
+        let container = create_redis_container().await;
+        let broker1 = create_broker(&container).await;
+        let broker2 = create_broker(&container).await;
+
+        let mut conn1 = broker1.connect().await.unwrap();
+        let mut conn2 = broker1.connect().await.unwrap();
+        let mut conn3 = broker2.connect().await.unwrap();
 
         conn1.subscribe("channel_all").await.unwrap();
         conn2.subscribe("channel_all").await.unwrap();
@@ -208,22 +243,12 @@ mod test {
 
     #[tokio::test]
     async fn test_unsubsribe() {
-        env::set_var("TESTCONTAINERS", "remove");
+        let container = create_redis_container().await;
+        let broker1 = create_broker(&container).await;
+        let broker2 = create_broker(&container).await;
 
-        let container = GenericImage::new("redis", "latest")
-            .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
-            .start()
-            .await;
-
-        let broker = {
-            let port = container.get_host_port_ipv4(6379).await;
-            RedisBroker::from_url(&format!("redis://localhost:{port}/1"), "test")
-                .await
-                .unwrap()
-        };
-
-        let mut conn1 = broker.connect().await.unwrap();
-        let mut conn2 = broker.connect().await.unwrap();
+        let mut conn1 = broker1.connect().await.unwrap();
+        let mut conn2 = broker2.connect().await.unwrap();
 
         conn1.subscribe("channel").await.unwrap();
         conn2.subscribe("channel").await.unwrap();
@@ -242,59 +267,39 @@ mod test {
 
     #[tokio::test]
     async fn test_broker_subscribers_count() {
-        env::set_var("TESTCONTAINERS", "remove");
+        let container = create_redis_container().await;
+        let broker1 = create_broker(&container).await;
+        let broker2 = create_broker(&container).await;
 
-        let container = GenericImage::new("redis", "latest")
-            .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
-            .start()
-            .await;
-
-        let broker = {
-            let port = container.get_host_port_ipv4(6379).await;
-            RedisBroker::from_url(&format!("redis://localhost:{port}/1"), "test")
-                .await
-                .unwrap()
-        };
-
-        let mut conn1 = broker.connect().await.unwrap();
-        let mut conn2 = broker.connect().await.unwrap();
+        let mut conn1 = broker1.connect().await.unwrap();
+        let mut conn2 = broker2.connect().await.unwrap();
 
         conn1.subscribe("channel1").await.unwrap();
         conn1.subscribe("channel2").await.unwrap();
         conn2.subscribe("channel1").await.unwrap();
 
-        assert_eq!(0, broker.subscribers_count("channel0").await);
-        assert_eq!(2, broker.subscribers_count("channel1").await);
-        assert_eq!(1, broker.subscribers_count("channel2").await);
+        assert_eq!(0, broker1.subscribers_count("channel0").await);
+        assert_eq!(2, broker1.subscribers_count("channel1").await);
+        assert_eq!(1, broker1.subscribers_count("channel2").await);
 
         conn1.unsubscribe("channel1").await.unwrap();
 
-        assert_eq!(1, broker.subscribers_count("channel1").await);
+        assert_eq!(1, broker2.subscribers_count("channel1").await);
 
         drop(conn2);
         time::sleep(time::Duration::from_secs(1)).await;
 
-        assert_eq!(0, broker.subscribers_count("channel1").await);
+        assert_eq!(0, broker2.subscribers_count("channel1").await);
     }
 
     #[tokio::test]
     async fn test_subscriptions() {
-        env::set_var("TESTCONTAINERS", "remove");
+        let container = create_redis_container().await;
+        let broker1 = create_broker(&container).await;
+        let broker2 = create_broker(&container).await;
 
-        let container = GenericImage::new("redis", "latest")
-            .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
-            .start()
-            .await;
-
-        let broker = {
-            let port = container.get_host_port_ipv4(6379).await;
-            RedisBroker::from_url(&format!("redis://localhost:{port}/1"), "test")
-                .await
-                .unwrap()
-        };
-
-        let mut conn1 = broker.connect().await.unwrap();
-        let mut conn2 = broker.connect().await.unwrap();
+        let mut conn1 = broker1.connect().await.unwrap();
+        let mut conn2 = broker2.connect().await.unwrap();
 
         conn1.subscribe("channel1").await.unwrap();
         conn1.subscribe("channel2").await.unwrap();
@@ -310,7 +315,7 @@ mod test {
                 (String::from("channel2"), 1),
                 (String::from("channel3"), 1)
             ]),
-            broker.subscriptions().await
+            broker1.subscriptions().await
         );
 
         drop(conn1);
@@ -318,7 +323,7 @@ mod test {
 
         assert_eq!(
             HashSet::from_iter([(String::from("channel1"), 1)]),
-            broker.subscriptions().await
+            broker2.subscriptions().await
         );
     }
 }
