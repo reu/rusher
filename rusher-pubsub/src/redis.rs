@@ -14,22 +14,23 @@ use super::{BoxError, Broker, Connection};
 pub struct RedisBroker {
     redis: RedisClient,
     subscriber: RedisClient,
-    namespace: Arc<String>,
+    namespace: Namespace,
 }
 
 impl RedisBroker {
     pub async fn from_url(url: &str, namespace: &str) -> Result<Self, BoxError> {
+        let namespace = Namespace(Arc::new(namespace.to_string()));
         let redis = RedisClient::new(RedisConfig::from_url(url)?, None, None, None);
         let subscriber = redis.clone_new();
         redis.init().await?;
         subscriber.init().await?;
         subscriber
-            .psubscribe(format!("channels:{namespace}:msgs:*"))
+            .psubscribe(namespace.channels_messages_pattern())
             .await?;
         Ok(Self {
             redis,
             subscriber,
-            namespace: Arc::new(namespace.to_string()),
+            namespace,
         })
     }
 }
@@ -48,14 +49,14 @@ impl Broker for RedisBroker {
 
     async fn subscribers_count(&self, channel: &str) -> usize {
         self.redis
-            .hget::<usize, _, _>(format!("subs:{}", self.namespace), channel)
+            .hget::<usize, _, _>(self.namespace.subscriptions_key(), channel)
             .await
             .unwrap_or(0)
     }
 
     async fn subscriptions(&self) -> HashSet<(String, usize)> {
         self.redis
-            .hgetall::<Vec<String>, _>(format!("subs:{}", self.namespace))
+            .hgetall::<Vec<String>, _>(self.namespace.subscriptions_key())
             .await
             .unwrap_or_default()
             .chunks_exact(2)
@@ -67,7 +68,7 @@ impl Broker for RedisBroker {
     async fn publish(&self, channel: &str, msg: impl Serialize) -> Result<(), BoxError> {
         self.redis
             .publish::<(), _, _>(
-                format!("channels:{}:msgs:{channel}", self.namespace),
+                self.namespace.channel_messages_key(channel),
                 serde_json::to_string(&msg)?,
             )
             .await?;
@@ -77,7 +78,7 @@ impl Broker for RedisBroker {
 
 #[derive(Debug)]
 pub struct RedisConnection {
-    namespace: Arc<String>,
+    namespace: Namespace,
     publisher: RedisClient,
     msgs: RedisReceiver<RedisMessage>,
     subs: HashSet<String>,
@@ -87,7 +88,7 @@ impl Connection for RedisConnection {
     async fn publish(&mut self, channel: &str, msg: impl Serialize) -> Result<(), BoxError> {
         self.publisher
             .publish::<(), _, _>(
-                format!("channels:{}:msgs:{channel}", self.namespace),
+                self.namespace.channel_messages_key(channel),
                 serde_json::to_string(&msg)?,
             )
             .await?;
@@ -96,7 +97,7 @@ impl Connection for RedisConnection {
 
     async fn subscribe(&mut self, channel: &str) -> Result<(), BoxError> {
         self.publisher
-            .hincrby::<(), _, _>(format!("subs:{}", self.namespace), channel, 1)
+            .hincrby::<(), _, _>(self.namespace.subscriptions_key(), channel, 1)
             .await?;
         self.subs.insert(channel.to_owned());
         Ok(())
@@ -104,7 +105,7 @@ impl Connection for RedisConnection {
 
     async fn unsubscribe(&mut self, channel: &str) -> Result<(), BoxError> {
         self.publisher
-            .hincrby::<(), _, _>(format!("subs:{}", self.namespace), channel, -1)
+            .hincrby::<(), _, _>(self.namespace.subscriptions_key(), channel, -1)
             .await?;
         self.subs.remove(channel);
         Ok(())
@@ -153,11 +154,32 @@ impl Drop for RedisConnection {
         tokio::spawn(async move {
             for channel in channels {
                 redis
-                    .hincrby::<(), _, _>(format!("subs:{namespace}"), channel, -1)
+                    .hincrby::<(), _, _>(namespace.subscriptions_key(), channel, -1)
                     .await?;
             }
             Ok::<_, BoxError>(())
         });
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct Namespace(Arc<String>);
+
+impl Namespace {
+    pub fn channels_messages_pattern(&self) -> String {
+        format!("channels:{}:msgs:*", self.0)
+    }
+
+    pub fn channel_messages_key(&self, channel: &str) -> String {
+        format!("channels:{}:msgs:{channel}", self.0)
+    }
+
+    pub fn subscriptions_key(&self) -> String {
+        format!("subs:{}", self.0)
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
     }
 }
 
