@@ -88,12 +88,13 @@ impl Broker for MemoryBroker {
             .unwrap_or(0)
     }
 
-    async fn subscriptions(&self) -> Vec<(String, usize)> {
+    async fn subscriptions(&self) -> HashSet<(String, usize)> {
         self.subscribers
             .lock()
             .await
             .iter()
             .map(|(channel, count)| (channel.clone(), *count))
+            .filter(|(_, count)| *count > 0)
             .collect()
     }
 
@@ -263,5 +264,40 @@ mod test {
         interval.tick().await;
 
         assert_eq!(1, broker.subscribers_count("channel1").await);
+    }
+
+    #[tokio::test]
+    async fn test_subscriptions() {
+        let mut interval = time::interval(time::Duration::from_millis(1));
+        let broker = MemoryBroker::default();
+        let mut conn1 = broker.connect().await.unwrap();
+        let mut conn2 = broker.connect().await.unwrap();
+
+        conn1.subscribe("channel1").await.unwrap();
+        conn1.subscribe("channel2").await.unwrap();
+        conn1.subscribe("channel3").await.unwrap();
+
+        conn2.subscribe("channel1").await.unwrap();
+        conn2.subscribe("channel3").await.unwrap();
+        conn2.unsubscribe("channel3").await.unwrap();
+
+        interval.tick().await;
+
+        assert_eq!(
+            HashSet::from_iter([
+                (String::from("channel1"), 2),
+                (String::from("channel2"), 1),
+                (String::from("channel3"), 1)
+            ]),
+            broker.subscriptions().await
+        );
+
+        drop(conn1);
+        interval.tick().await;
+
+        assert_eq!(
+            HashSet::from_iter([(String::from("channel1"), 1)]),
+            broker.subscriptions().await
+        );
     }
 }

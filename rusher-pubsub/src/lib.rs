@@ -1,6 +1,6 @@
 #![allow(async_fn_in_trait)]
 
-use std::error::Error;
+use std::{collections::HashSet, error::Error};
 
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -13,7 +13,7 @@ pub trait Broker: Clone {
     type Conn: Connection;
     async fn connect(&self) -> Result<Self::Conn, BoxError>;
     async fn subscribers_count(&self, channel: &str) -> usize;
-    async fn subscriptions(&self) -> Vec<(String, usize)>;
+    async fn subscriptions(&self) -> HashSet<(String, usize)>;
     async fn publish(&self, channel: &str, msg: impl Serialize) -> Result<(), BoxError>;
 }
 
@@ -60,7 +60,7 @@ impl Broker for AnyBroker {
         }
     }
 
-    async fn subscriptions(&self) -> Vec<(String, usize)> {
+    async fn subscriptions(&self) -> HashSet<(String, usize)> {
         match self {
             Self::Memory(broker) => broker.subscriptions().await,
             Self::Redis(broker) => broker.subscriptions().await,

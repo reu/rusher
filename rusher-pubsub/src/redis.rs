@@ -2,10 +2,9 @@ use std::{borrow::Borrow, collections::HashSet, mem, sync::Arc};
 
 use fred::{
     clients::RedisClient,
-    interfaces::{ClientLike, EventInterface, KeysInterface, PubsubInterface},
-    types::{Message as RedisMessage, RedisConfig, ScanType, Scanner},
+    interfaces::{ClientLike, EventInterface, HashesInterface, PubsubInterface},
+    types::{Message as RedisMessage, RedisConfig},
 };
-use futures::TryStreamExt;
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::sync::broadcast::{error::TryRecvError, Receiver as RedisReceiver};
 
@@ -48,33 +47,25 @@ impl Broker for RedisBroker {
 
     async fn subscribers_count(&self, channel: &str) -> usize {
         self.redis
-            .get::<usize, _>(format!("subs:{}:{channel}:count", self.namespace))
+            .hget::<usize, _, _>(format!("subs:{}", self.namespace), channel)
             .await
             .unwrap_or(0)
     }
 
-    async fn subscriptions(&self) -> Vec<(String, usize)> {
+    async fn subscriptions(&self) -> HashSet<(String, usize)> {
         self.redis
-            .scan(
-                format!("subs:{}:*:count", self.namespace),
-                Some(256),
-                Some(ScanType::String),
-            )
-            .try_collect::<Vec<_>>()
+            .hgetall::<Vec<String>, _>(format!("subs:{}", self.namespace))
             .await
             .unwrap_or_default()
-            .into_iter()
-            .map(|mut res| {
-                let a = res.take_results().unwrap_or_default();
-                dbg!(a);
-                (String::from("lol"), 10)
-            })
+            .chunks_exact(2)
+            .filter_map(|res| Some((res[0].clone(), res[1].parse().ok()?)))
+            .filter(|(_, count)| *count > 0)
             .collect()
     }
 
     async fn publish(&self, channel: &str, msg: impl Serialize) -> Result<(), BoxError> {
         self.redis
-            .publish(channel.to_owned(), serde_json::to_string(&msg)?)
+            .publish::<(), _, _>(channel.to_owned(), serde_json::to_string(&msg)?)
             .await?;
         Ok(())
     }
@@ -92,7 +83,7 @@ pub struct RedisConnection {
 impl Connection for RedisConnection {
     async fn publish(&mut self, channel: &str, msg: impl Serialize) -> Result<(), BoxError> {
         self.publisher
-            .publish(channel.to_owned(), serde_json::to_string(&msg)?)
+            .publish::<(), _, _>(channel.to_owned(), serde_json::to_string(&msg)?)
             .await?;
         Ok(())
     }
@@ -100,7 +91,7 @@ impl Connection for RedisConnection {
     async fn subscribe(&mut self, channel: &str) -> Result<(), BoxError> {
         self.subscriber.subscribe(channel).await?;
         self.publisher
-            .incr(format!("subs:{}:{channel}:count", self.namespace))
+            .hincrby::<(), _, _>(format!("subs:{}", self.namespace), channel, 1)
             .await?;
         self.subs.insert(channel.to_owned());
         Ok(())
@@ -109,7 +100,7 @@ impl Connection for RedisConnection {
     async fn unsubscribe(&mut self, channel: &str) -> Result<(), BoxError> {
         self.subscriber.unsubscribe(channel).await?;
         self.publisher
-            .decr(format!("subs:{}:{channel}:count", self.namespace))
+            .hincrby::<(), _, _>(format!("subs:{}", self.namespace), channel, -1)
             .await?;
         self.subs.remove(channel);
         Ok(())
@@ -148,7 +139,7 @@ impl Drop for RedisConnection {
         tokio::spawn(async move {
             for channel in channels {
                 redis
-                    .decr(format!("subs:{namespace}:{channel}:count"))
+                    .hincrby::<(), _, _>(format!("subs:{namespace}"), channel, -1)
                     .await?;
             }
             Ok::<_, BoxError>(())
@@ -284,5 +275,50 @@ mod test {
         time::sleep(time::Duration::from_secs(1)).await;
 
         assert_eq!(0, broker.subscribers_count("channel1").await);
+    }
+
+    #[tokio::test]
+    async fn test_subscriptions() {
+        env::set_var("TESTCONTAINERS", "remove");
+
+        let container = GenericImage::new("redis", "latest")
+            .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
+            .start()
+            .await;
+
+        let broker = {
+            let port = container.get_host_port_ipv4(6379).await;
+            RedisBroker::from_url(&format!("redis://localhost:{port}/1"), "test")
+                .await
+                .unwrap()
+        };
+
+        let mut conn1 = broker.connect().await.unwrap();
+        let mut conn2 = broker.connect().await.unwrap();
+
+        conn1.subscribe("channel1").await.unwrap();
+        conn1.subscribe("channel2").await.unwrap();
+        conn1.subscribe("channel3").await.unwrap();
+
+        conn2.subscribe("channel1").await.unwrap();
+        conn2.subscribe("channel3").await.unwrap();
+        conn2.unsubscribe("channel3").await.unwrap();
+
+        assert_eq!(
+            HashSet::from_iter([
+                (String::from("channel1"), 2),
+                (String::from("channel2"), 1),
+                (String::from("channel3"), 1)
+            ]),
+            broker.subscriptions().await
+        );
+
+        drop(conn1);
+        time::sleep(time::Duration::from_secs(1)).await;
+
+        assert_eq!(
+            HashSet::from_iter([(String::from("channel1"), 1)]),
+            broker.subscriptions().await
+        );
     }
 }
