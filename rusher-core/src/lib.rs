@@ -3,6 +3,8 @@ use std::{collections::HashMap, fmt::Display, str::FromStr};
 use rand::{distributions, prelude::Distribution};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
+pub mod signature;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SocketId(String);
 

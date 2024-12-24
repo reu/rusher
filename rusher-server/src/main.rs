@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::bail;
 use async_trait::async_trait;
+use authentication::check_signature_middleware;
 use axum::{
     body::Body,
     extract::{ws::Message, Path, Request, State, WebSocketUpgrade},
@@ -20,11 +21,16 @@ use rand::Rng;
 use rusher_core::{ChannelName, ClientEvent, ConnectionInfo, CustomEvent, ServerEvent, SocketId};
 use rusher_pubsub::{AnyBroker, Broker, Connection};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::{net::TcpListener, sync::mpsc};
+
+mod authentication;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AppId(String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AppSecret(String);
 
 #[tokio::main]
 async fn main() {
@@ -38,72 +44,81 @@ async fn main() {
         .map(|app| {
             app.split(',')
                 .map(|app| app.trim())
-                .filter(|app| !app.is_empty())
-                .map(|app| app.to_owned())
-                .map(AppId)
+                .filter_map(|app| app.split_once(':'))
+                .map(|(id, secret)| (AppId(id.to_owned()), AppSecret(secret.to_owned())))
                 .collect::<HashSet<_>>()
         })
         .unwrap_or_default();
 
     let listener = TcpListener::bind(("0.0.0.0", port)).await.unwrap();
 
-    let broker_repo = match env::var("REDIS_URL") {
+    let app_repo = match env::var("REDIS_URL") {
         Ok(redis_url) => {
             let mut repo = HashMap::new();
-            for app in apps {
-                let broker = AnyBroker::redis(&redis_url, &app.0).await.unwrap();
-                repo.insert(app, broker);
+            for (id, secret) in apps {
+                let broker = AnyBroker::redis(&redis_url, &id.0).await.unwrap();
+                repo.insert(id, (secret, broker));
             }
             repo
         }
         _ => apps
             .into_iter()
-            .map(|app| (app, AnyBroker::memory()))
-            .collect::<HashMap<AppId, AnyBroker>>(),
+            .map(|(id, secret)| (id, (secret, AnyBroker::memory())))
+            .collect(),
     };
 
-    let app = app(broker_repo);
+    let app = app(app_repo);
 
     axum::serve(listener, app).await.unwrap();
 }
 
 #[async_trait]
-pub trait BrokerRepository: Send + Sync {
+pub trait AppRepository: Send + Sync {
+    async fn secret_for_app(&self, app_id: &AppId) -> Option<AppSecret>;
     async fn broker_for_app(&self, app_id: &AppId) -> Option<AnyBroker>;
 }
 
 #[async_trait]
-impl BrokerRepository for HashMap<AppId, AnyBroker> {
+impl AppRepository for HashMap<AppId, (AppSecret, AnyBroker)> {
+    async fn secret_for_app(&self, app_id: &AppId) -> Option<AppSecret> {
+        self.get(app_id).map(|(secret, _)| secret).cloned()
+    }
+
     async fn broker_for_app(&self, app_id: &AppId) -> Option<AnyBroker> {
-        self.get(app_id).cloned()
+        self.get(app_id).map(|(_, broker)| broker).cloned()
     }
 }
 
-pub fn app<T: BrokerRepository + 'static>(broker_repo: T) -> Router {
+pub fn app<T: AppRepository + 'static>(app_repo: T) -> Router {
     Router::new()
         .route("/app/:app/channels", get(list_channels))
         .route("/app/:app", post(publish))
+        .route_layer(middleware::from_fn(check_signature_middleware))
         .route("/app/:app", any(handle_ws))
         .route_layer(middleware::from_fn_with_state(
-            Arc::new(broker_repo) as Arc<dyn BrokerRepository>,
+            Arc::new(app_repo) as Arc<dyn AppRepository>,
             broker_middleware,
         ))
 }
 
 async fn broker_middleware(
-    State(broker_repo): State<Arc<dyn BrokerRepository>>,
+    State(app_repo): State<Arc<dyn AppRepository>>,
     Path(app): Path<String>,
     mut request: Request,
     next: Next,
 ) -> Response {
     let app_id = AppId(app);
-    match broker_repo.broker_for_app(&app_id).await {
-        Some(broker) => {
+    match (
+        app_repo.secret_for_app(&app_id).await,
+        app_repo.broker_for_app(&app_id).await,
+    ) {
+        (Some(secret), Some(broker)) => {
             request.extensions_mut().insert(app_id);
+            request.extensions_mut().insert(secret);
             request.extensions_mut().insert(broker);
             next.run(request).await
         }
-        None => Response::builder()
+        _ => Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(Body::empty())
             .unwrap(),
