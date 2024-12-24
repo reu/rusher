@@ -21,7 +21,7 @@ use rand::Rng;
 use rusher_core::{ChannelName, ClientEvent, ConnectionInfo, CustomEvent, ServerEvent, SocketId};
 use rusher_pubsub::{AnyBroker, Broker, Connection};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Value as JsonValue};
 use tokio::{net::TcpListener, sync::mpsc};
 
 mod authentication;
@@ -91,8 +91,8 @@ impl AppRepository for HashMap<AppId, (AppSecret, AnyBroker)> {
 
 pub fn app<T: AppRepository + 'static>(app_repo: T) -> Router {
     Router::new()
-        .route("/app/:app/channels", get(list_channels))
-        .route("/app/:app", post(publish))
+        .route("/apps/:app/channels", get(list_channels))
+        .route("/apps/:app/events", post(publish))
         .route_layer(middleware::from_fn(check_signature_middleware))
         .route("/app/:app", any(handle_ws))
         .route_layer(middleware::from_fn_with_state(
@@ -128,7 +128,7 @@ async fn broker_middleware(
 #[derive(Clone, Debug, Deserialize)]
 pub struct EventPayload {
     pub name: String,
-    pub data: String,
+    pub data: JsonValue,
     pub channels: Option<HashSet<ChannelName>>,
     pub channel: Option<ChannelName>,
     pub socket_id: Option<SocketId>,
@@ -137,18 +137,35 @@ pub struct EventPayload {
 async fn publish(
     Extension(broker): Extension<AnyBroker>,
     Json(payload): Json<EventPayload>,
-) -> impl IntoResponse {
-    let channel = payload.channel.unwrap();
-    let event = ServerEvent::ChannelEvent(CustomEvent {
-        event: payload.name,
-        data: payload.data.into(),
-        channel: channel.to_owned(),
-        user_id: None,
-    });
-    match broker.publish(channel.as_ref(), event).await {
-        Ok(()) => Ok(Json(json!({ "ok": true }))),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+) -> Result<Json<JsonValue>, StatusCode> {
+    let event = payload.name;
+    let data = payload.data;
+
+    let channels = match (payload.channel, payload.channels) {
+        (Some(channel), Some(mut channels)) => {
+            channels.insert(channel);
+            channels
+        }
+        (Some(channel), None) => HashSet::from_iter([channel]),
+        (None, Some(channels)) => channels,
+        _ => HashSet::new(),
+    };
+
+    for channel in channels {
+        let event = ServerEvent::ChannelEvent(CustomEvent {
+            event: event.clone(),
+            data: data.clone(),
+            channel: channel.clone(),
+            user_id: None,
+        });
+
+        broker
+            .publish(channel.as_ref(), event)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
+
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn list_channels(Extension(broker): Extension<AnyBroker>) -> impl IntoResponse {
@@ -156,7 +173,6 @@ async fn list_channels(Extension(broker): Extension<AnyBroker>) -> impl IntoResp
         .subscriptions()
         .await
         .into_iter()
-        .filter(|(_, count)| *count > 0)
         .map(|(channel, count)| {
             (
                 channel,
@@ -166,7 +182,7 @@ async fn list_channels(Extension(broker): Extension<AnyBroker>) -> impl IntoResp
                 }),
             )
         })
-        .collect::<HashMap<String, serde_json::Value>>();
+        .collect::<HashMap<String, JsonValue>>();
 
     Json(channels)
 }
