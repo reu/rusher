@@ -145,7 +145,7 @@ enum PusherClientEvent {
     #[serde(rename = "pusher:unsubscribe")]
     Unsubscribe { channel: ChannelName },
     #[serde(rename = "pusher:ping")]
-    Ping,
+    Ping { data: Option<serde_json::Value> },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -177,7 +177,7 @@ impl From<ClientEventJson> for ClientEvent {
                 channel_data,
             },
             PusherEvent(Unsubscribe { channel }) => ClientEvent::Unsubscribe { channel },
-            PusherEvent(Ping) => ClientEvent::Ping,
+            PusherEvent(Ping { .. }) => ClientEvent::Ping,
             CustomEvent(CustomClientEvent {
                 event,
                 channel,
@@ -463,7 +463,7 @@ mod tests {
     #[test]
     fn test_deserialize_ping() {
         let event = ClientEvent::Ping;
-        let serialized = json!({ "event": "pusher:ping" });
+        let serialized = json!({ "event": "pusher:ping", "data": {} });
         let deserialized = serde_json::from_value::<ClientEvent>(serialized).unwrap();
         assert_eq!(event, deserialized);
     }
