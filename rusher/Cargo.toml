@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.82"
-axum = { version = "0.7.5", features = ["http2", "ws"] }
 rusher-pubsub = { path = "../rusher-pubsub" }
 rusher-server = { path = "../rusher-server" }
 tokio = { version = "1.37.0", features = ["full"] }

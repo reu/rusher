@@ -50,7 +50,7 @@ async fn main() {
             .collect(),
     };
 
-    axum::serve(listener, rusher_server::app(app_repo))
+    rusher_server::serve(listener, rusher_server::app(app_repo))
         .await
         .unwrap();
 }

@@ -26,6 +26,8 @@ use tokio::sync::mpsc;
 
 mod authentication;
 
+pub use axum::serve;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct App {
     pub id: AppId,
