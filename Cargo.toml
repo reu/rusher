@@ -1,4 +1,4 @@
 [workspace]
 resolver = "2"
-members = ["rusher-*"]
-default-members = ["rusher-*"]
+members = ["rusher", "rusher-*"]
+default-members = ["rusher", "rusher-*"]

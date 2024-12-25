@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    env,
+    fmt::{self, Debug},
     sync::Arc,
 };
 
@@ -22,54 +22,50 @@ use rusher_core::{ChannelName, ClientEvent, ConnectionInfo, CustomEvent, ServerE
 use rusher_pubsub::{AnyBroker, Broker, Connection};
 use serde::Deserialize;
 use serde_json::{json, Value as JsonValue};
-use tokio::{net::TcpListener, sync::mpsc};
+use tokio::sync::mpsc;
 
 mod authentication;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct App {
+    pub id: AppId,
+    secret: AppSecret,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AppId(String);
+
+impl fmt::Display for AppId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AppSecret(String);
 
-#[tokio::main]
-async fn main() {
-    let port = env::var("PORT")
-        .ok()
-        .and_then(|port| port.parse::<u16>().ok())
-        .unwrap_or(4444);
-
-    let apps = env::var("APP")
-        .ok()
-        .map(|app| {
-            app.split(',')
-                .map(|app| app.trim())
-                .filter_map(|app| app.split_once(':'))
-                .map(|(id, secret)| (AppId(id.to_owned()), AppSecret(secret.to_owned())))
-                .collect::<HashSet<_>>()
-        })
-        .unwrap_or_default();
-
-    let listener = TcpListener::bind(("0.0.0.0", port)).await.unwrap();
-
-    let app_repo = match env::var("REDIS_URL") {
-        Ok(redis_url) => {
-            let mut repo = HashMap::new();
-            for (id, secret) in apps {
-                let broker = AnyBroker::redis(&redis_url, &id.0).await.unwrap();
-                repo.insert(id, (secret, broker));
-            }
-            repo
+impl App {
+    pub fn new(id: impl Into<String>, secret: impl Into<String>) -> Self {
+        Self {
+            id: AppId(id.into()),
+            secret: AppSecret(secret.into()),
         }
-        _ => apps
-            .into_iter()
-            .map(|(id, secret)| (id, (secret, AnyBroker::memory())))
-            .collect(),
-    };
+    }
+}
 
-    let app = app(app_repo);
+pub trait IntoAppRepository {
+    type AppRepository: AppRepository + 'static;
+    fn into_app_repository(self) -> Self::AppRepository;
+}
 
-    axum::serve(listener, app).await.unwrap();
+impl<I: IntoIterator<Item = (App, AnyBroker)>> IntoAppRepository for I {
+    type AppRepository = HashMap<AppId, (App, AnyBroker)>;
+
+    fn into_app_repository(self) -> Self::AppRepository {
+        self.into_iter()
+            .map(|(app, broker)| (app.id.clone(), (app, broker)))
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -79,9 +75,9 @@ pub trait AppRepository: Send + Sync {
 }
 
 #[async_trait]
-impl AppRepository for HashMap<AppId, (AppSecret, AnyBroker)> {
+impl AppRepository for HashMap<AppId, (App, AnyBroker)> {
     async fn secret_for_app(&self, app_id: &AppId) -> Option<AppSecret> {
-        self.get(app_id).map(|(secret, _)| secret).cloned()
+        self.get(app_id).map(|(app, _)| app.secret.clone())
     }
 
     async fn broker_for_app(&self, app_id: &AppId) -> Option<AnyBroker> {
@@ -89,7 +85,8 @@ impl AppRepository for HashMap<AppId, (AppSecret, AnyBroker)> {
     }
 }
 
-pub fn app<T: AppRepository + 'static>(app_repo: T) -> Router {
+pub fn app(app_repo: impl IntoAppRepository) -> Router {
+    let app_repo = app_repo.into_app_repository();
     Router::new()
         .route("/apps/:app/channels", get(list_channels))
         .route("/apps/:app/events", post(publish))

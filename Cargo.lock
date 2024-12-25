@@ -1413,6 +1413,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusher"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "rusher-pubsub",
+ "rusher-server",
+ "tokio",
+]
+
+[[package]]
 name = "rusher-bench"
 version = "0.1.0"
 dependencies = [

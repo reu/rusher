@@ -124,9 +124,7 @@ pub enum ClientEvent {
         channel_data: Option<serde_json::Value>,
     },
     #[serde(rename = "pusher:unsubscribe")]
-    Unsubscribe {
-        channel: ChannelName,
-    },
+    Unsubscribe { channel: ChannelName },
     #[serde(rename = "pusher:ping")]
     Ping,
     #[serde(untagged)]
