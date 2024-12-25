@@ -262,6 +262,8 @@ async fn handle_ws(
                                 _ => continue,
                             }
                         }
+
+                        else => break,
                     }
                 }
                 anyhow::Ok(())

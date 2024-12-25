@@ -20,10 +20,7 @@ pub struct RedisBroker {
 impl RedisBroker {
     pub async fn from_url(url: &str, namespace: &str) -> Result<Self, BoxError> {
         let namespace = Namespace(Arc::new(namespace.to_string()));
-        let redis = RedisClient::new(RedisConfig::from_url(url)?, None, None, None);
-        let subscriber = redis.clone_new();
-        redis.init().await?;
-        subscriber.init().await?;
+        let (redis, subscriber) = RedisBroker::new_connection_pair(url).await?;
         subscriber
             .psubscribe(namespace.channels_messages_pattern())
             .await?;
@@ -32,6 +29,30 @@ impl RedisBroker {
             subscriber,
             namespace,
         })
+    }
+
+    pub async fn from_connection_pair(
+        publisher: RedisClient,
+        subscriber: RedisClient,
+        namespace: &str,
+    ) -> Result<Self, BoxError> {
+        let namespace = Namespace(Arc::new(namespace.to_string()));
+        subscriber
+            .psubscribe(namespace.channels_messages_pattern())
+            .await?;
+        Ok(Self {
+            redis: publisher,
+            subscriber,
+            namespace,
+        })
+    }
+
+    pub async fn new_connection_pair(url: &str) -> Result<(RedisClient, RedisClient), BoxError> {
+        let publisher = RedisClient::new(RedisConfig::from_url(url)?, None, None, None);
+        let subscriber = publisher.clone_new();
+        publisher.init().await?;
+        subscriber.init().await?;
+        Ok((publisher, subscriber))
     }
 }
 

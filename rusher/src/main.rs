@@ -3,7 +3,7 @@ use std::{
     env,
 };
 
-use rusher_pubsub::AnyBroker;
+use rusher_pubsub::{redis::RedisBroker, AnyBroker};
 use rusher_server::App;
 use tokio::net::TcpListener;
 
@@ -29,12 +29,18 @@ async fn main() {
 
     let app_repo = match env::var("REDIS_URL") {
         Ok(redis_url) => {
+            let (publisher, subscriber) =
+                RedisBroker::new_connection_pair(&redis_url).await.unwrap();
+
             let mut repo = HashMap::new();
             for app in apps {
-                let broker = AnyBroker::redis(&redis_url, &app.id.to_string())
-                    .await
-                    .unwrap();
-                repo.insert(app, broker);
+                let namespace = app.id.to_string();
+                repo.insert(
+                    app,
+                    AnyBroker::redis_single(publisher.clone(), subscriber.clone(), &namespace)
+                        .await
+                        .unwrap(),
+                );
             }
             repo
         }

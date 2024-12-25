@@ -2,10 +2,11 @@
 
 use std::{collections::HashSet, error::Error};
 
+use fred::prelude::RedisClient;
 use serde::{de::DeserializeOwned, Serialize};
 
-mod memory;
-mod redis;
+pub mod memory;
+pub mod redis;
 
 pub(crate) type BoxError = Box<dyn Error + Send + Sync>;
 
@@ -39,6 +40,16 @@ impl AnyBroker {
     pub async fn redis(url: &str, namespace: &str) -> Result<Self, BoxError> {
         Ok(Self::Redis(
             redis::RedisBroker::from_url(url, namespace).await?,
+        ))
+    }
+
+    pub async fn redis_single(
+        publisher: RedisClient,
+        subscriber: RedisClient,
+        namespace: &str,
+    ) -> Result<Self, BoxError> {
+        Ok(Self::Redis(
+            redis::RedisBroker::from_connection_pair(publisher, subscriber, namespace).await?,
         ))
     }
 }
