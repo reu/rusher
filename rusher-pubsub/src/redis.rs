@@ -73,6 +73,7 @@ impl Broker for RedisBroker {
             publisher: self.redis.clone(),
             msgs: self.subscriber.message_rx(),
             subs: HashSet::default(),
+            user_id: None,
         })
     }
 
@@ -111,9 +112,26 @@ pub struct RedisConnection {
     publisher: RedisClient,
     msgs: RedisReceiver<RedisMessage>,
     subs: HashSet<String>,
+    user_id: Option<String>,
 }
 
 impl Connection for RedisConnection {
+    async fn authenticate(&mut self, user_id: &str, _data: impl Serialize) -> Result<(), BoxError> {
+        match self.user_id.as_mut() {
+            Some(current_user_id) if current_user_id != user_id => {
+                Err("Connection already authenticated".into())
+            }
+            Some(current_user_id) => {
+                *current_user_id = user_id.to_owned();
+                Ok(())
+            }
+            None => {
+                self.user_id = Some(user_id.to_string());
+                Ok(())
+            }
+        }
+    }
+
     async fn publish(&mut self, channel: &str, msg: impl Serialize) -> Result<(), BoxError> {
         self.publisher
             .publish::<(), _, _>(

@@ -18,7 +18,11 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 use rand::Rng;
-use rusher_core::{ChannelName, ClientEvent, ConnectionInfo, CustomEvent, ServerEvent, SocketId};
+use rusher_core::{
+    signature::{sign_private_channel, sign_user_data},
+    ChannelName, ClientEvent, ConnectionInfo, CustomEvent, ServerEvent, SigninInformation,
+    SocketId, UserData,
+};
 use rusher_pubsub::{AnyBroker, Broker, Connection};
 use serde::Deserialize;
 use serde_json::{json, Value as JsonValue};
@@ -188,11 +192,15 @@ async fn list_channels(Extension(broker): Extension<AnyBroker>) -> impl IntoResp
 
 async fn handle_ws(
     Extension(broker): Extension<AnyBroker>,
+    Extension(AppId(app_id)): Extension<AppId>,
+    Extension(AppSecret(secret)): Extension<AppSecret>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     match broker.connect().await {
         Ok(mut connection) => Ok(ws.on_upgrade(move |ws| async move {
-            let socket_id = rand::thread_rng().gen();
+            let app_id = app_id.clone();
+            let secret = secret.clone();
+            let socket_id: SocketId = rand::thread_rng().gen();
 
             let (mut write_ws, mut read_ws) = ws.split();
             let (tx, mut rx) = mpsc::channel(64);
@@ -208,28 +216,109 @@ async fn handle_ws(
                 anyhow::Ok(())
             };
 
-            #[allow(unused)]
             let read_messages = async move {
+                let app_id = app_id.clone();
+                let secret = secret.clone();
+
                 tx.send(ServerEvent::ConnectionEstablished {
                     data: ConnectionInfo {
-                        socket_id,
+                        socket_id: socket_id.clone(),
                         activity_timeout: 120,
                     },
                 })
                 .await?;
 
                 loop {
+                    let app_id = app_id.clone();
+                    let secret = secret.clone();
+
                     tokio::select! {
                         Ok(msg) = connection.recv() => {
-                            tx.send(msg).await;
+                            tx.send(msg).await.ok();
                         },
 
                         Some(Ok(msg)) = read_ws.next() => {
                             match msg {
                                 Message::Text(text) => {
                                     match serde_json::from_str(&text) {
+                                        Ok(ClientEvent::Signin { auth, user_data }) => {
+                                            let (sent_id, auth) = auth.split_once(":").unwrap_or_default();
+
+                                            let valid_signature =
+                                                sign_user_data(secret, &socket_id, &user_data)
+                                                    .map(|signature| {
+                                                        signature.verify(hex::decode(auth).unwrap_or_default())
+                                                    })
+                                                    .unwrap_or(false);
+
+                                            if app_id != sent_id || !valid_signature {
+                                                tx.send(ServerEvent::Error {
+                                                    message: String::from("Invalid signature"),
+                                                    code: Some(409),
+                                                })
+                                                .await?;
+                                                continue
+                                            }
+
+                                            let user = serde_json::from_str::<UserData>(&user_data).unwrap();
+
+                                            if connection.authenticate(&user.id, &user).await.is_err() {
+                                                tx.send(ServerEvent::Error {
+                                                    message: String::from("Failed to authenticate user"),
+                                                    code: Some(409),
+                                                })
+                                                .await?;
+                                                continue
+                                            }
+
+                                            tx.send(ServerEvent::SigninSucceeded {
+                                                data: SigninInformation { user_data: user }
+                                            })
+                                            .await?;
+
+                                            continue
+                                        },
                                         Ok(ClientEvent::Ping) => tx.send(ServerEvent::Pong).await?,
-                                        Ok(ClientEvent::Subscribe { channel, .. }) => {
+                                        Ok(ClientEvent::Subscribe { channel, auth, .. }) => {
+                                            match channel {
+                                                ref channel @ ChannelName::Private(_) => {
+                                                    let (sent_id, auth) = auth
+                                                        .as_ref()
+                                                        .and_then(|auth| auth.split_once(':'))
+                                                        .unwrap_or_default();
+
+                                                    let valid_signature =
+                                                        sign_private_channel(secret, &socket_id, channel)
+                                                            .map(|signature| {
+                                                                signature.verify(hex::decode(auth).unwrap_or_default())
+                                                            })
+                                                            .unwrap_or(false);
+
+                                                    if app_id != sent_id || !valid_signature {
+                                                        tx.send(ServerEvent::Error {
+                                                            message: String::from("Invalid signature"),
+                                                            code: Some(409),
+                                                        })
+                                                        .await?;
+                                                        continue
+                                                    }
+                                                },
+                                                ChannelName::Presence(_) => {
+                                                    tx.send(ServerEvent::Error {
+                                                        message: String::from("Presence channels are not supported"),
+                                                        code: None,
+                                                    })
+                                                    .await?;
+                                                },
+                                                ChannelName::Encrypted(_) => {
+                                                    tx.send(ServerEvent::Error {
+                                                        message: String::from("Encrypted channels are not supported"),
+                                                        code: None,
+                                                    })
+                                                    .await?;
+                                                },
+                                                _ => {},
+                                            };
                                             connection.subscribe(channel.as_ref()).await.ok();
                                             tx.send(ServerEvent::SubscriptionSucceeded {
                                                 channel,

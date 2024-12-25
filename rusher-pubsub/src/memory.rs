@@ -76,6 +76,7 @@ impl Broker for MemoryBroker {
             receiver,
             events: events_tx,
             subs: HashSet::new(),
+            user_id: None,
         })
     }
 
@@ -117,6 +118,7 @@ pub struct MemoryConnection {
     receiver: broadcast::Receiver<(String, Vec<u8>)>,
     events: mpsc::UnboundedSender<ConnectionEvent>,
     subs: HashSet<String>,
+    user_id: Option<String>,
 }
 
 impl Drop for MemoryConnection {
@@ -130,6 +132,22 @@ impl Drop for MemoryConnection {
 }
 
 impl Connection for MemoryConnection {
+    async fn authenticate(&mut self, user_id: &str, _data: impl Serialize) -> Result<(), BoxError> {
+        match self.user_id.as_mut() {
+            Some(current_user_id) if current_user_id != user_id => {
+                Err("Connection already authenticated".into())
+            }
+            Some(current_user_id) => {
+                *current_user_id = user_id.to_owned();
+                Ok(())
+            }
+            None => {
+                self.user_id = Some(user_id.to_string());
+                Ok(())
+            }
+        }
+    }
+
     async fn publish(&mut self, channel: &str, msg: impl Serialize) -> Result<(), BoxError> {
         self.sender
             .send((channel.to_owned(), serde_json::to_vec(&msg)?))?;

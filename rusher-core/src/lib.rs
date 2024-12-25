@@ -8,6 +8,12 @@ pub mod signature;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SocketId(String);
 
+impl Display for SocketId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 impl Distribution<SocketId> for distributions::Standard {
     fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> SocketId {
         let digits = distributions::Uniform::from(0..=9)
@@ -117,6 +123,8 @@ impl<'de> Deserialize<'de> for ChannelName {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(from = "ClientEventJson", tag = "event", content = "data")]
 pub enum ClientEvent {
+    #[serde(rename = "pusher:signin")]
+    Signin { auth: String, user_data: String },
     #[serde(rename = "pusher:subscribe")]
     Subscribe {
         channel: ChannelName,
@@ -138,6 +146,8 @@ pub enum ClientEvent {
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "event", content = "data")]
 enum PusherClientEvent {
+    #[serde(rename = "pusher:signin")]
+    Signin { auth: String, user_data: String },
     #[serde(rename = "pusher:subscribe")]
     Subscribe {
         channel: ChannelName,
@@ -169,6 +179,7 @@ impl From<ClientEventJson> for ClientEvent {
         use ClientEventJson::*;
         use PusherClientEvent::*;
         match json {
+            PusherEvent(Signin { auth, user_data }) => ClientEvent::Signin { auth, user_data },
             PusherEvent(Subscribe {
                 channel,
                 auth,
@@ -191,6 +202,12 @@ impl From<ClientEventJson> for ClientEvent {
             },
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SigninInformation {
+    #[serde(with = "json_string")]
+    pub user_data: UserData,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -231,12 +248,24 @@ pub struct ConnectionInfo {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UserData {
+    pub id: String,
+    pub user_info: Option<serde_json::Value>,
+    pub watchlist: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(from = "ServerEventJson", into = "ServerEventJson")]
 pub enum ServerEvent {
     #[serde(rename = "pusher:connection_established")]
     ConnectionEstablished {
         #[serde(with = "json_string")]
         data: ConnectionInfo,
+    },
+
+    #[serde(rename = "pusher:signin_success")]
+    SigninSucceeded {
+        data: SigninInformation,
     },
 
     #[serde(rename = "pusher:error")]
@@ -280,6 +309,7 @@ impl From<ServerEventJson> for ServerEvent {
             PusherEvent(ConnectionEstablished { data }) => {
                 ServerEvent::ConnectionEstablished { data }
             }
+            PusherEvent(SigninSucceeded { data }) => ServerEvent::SigninSucceeded { data },
             PusherEvent(Error { message, code }) => ServerEvent::Error { message, code },
             PusherEvent(Pong) => ServerEvent::Pong,
             PusherEvent(SubscriptionSucceeded { channel, data }) => {
@@ -304,6 +334,7 @@ impl From<ServerEvent> for ServerEventJson {
             ConnectionEstablished { data } => {
                 PusherEvent(PusherServerEvent::ConnectionEstablished { data })
             }
+            SigninSucceeded { data } => PusherEvent(PusherServerEvent::SigninSucceeded { data }),
             Error { message, code } => PusherEvent(PusherServerEvent::Error { message, code }),
             Pong => PusherEvent(PusherServerEvent::Pong),
             SubscriptionSucceeded { channel, data } => {
@@ -335,6 +366,9 @@ pub enum PusherServerEvent {
         #[serde(with = "json_string")]
         data: ConnectionInfo,
     },
+
+    #[serde(rename = "pusher:signin_success")]
+    SigninSucceeded { data: SigninInformation },
 
     #[serde(rename = "pusher:error")]
     Error { message: String, code: Option<u16> },
@@ -466,6 +500,33 @@ mod tests {
     fn test_deserialize_ping() {
         let event = ClientEvent::Ping;
         let serialized = json!({ "event": "pusher:ping", "data": {} });
+        let deserialized = serde_json::from_value::<ClientEvent>(serialized).unwrap();
+        assert_eq!(event, deserialized);
+    }
+
+    #[test]
+    fn test_deserialize_signin() {
+        let event = ClientEvent::Signin {
+            auth: "1234".to_owned(),
+            user_data: serde_json::to_string(&UserData {
+                id: "user1".to_owned(),
+                user_info: Some(json!({ "lol": "wut" })),
+                watchlist: Some(vec!["user2".to_owned(), "user3".to_owned()]),
+            })
+            .unwrap(),
+        };
+
+        let serialized = json!({
+            "event": "pusher:signin",
+            "data": {
+                "auth": "1234",
+                "user_data": serde_json::to_string(&json!({
+                    "id": "user1",
+                    "user_info": { "lol": "wut" },
+                    "watchlist": ["user2", "user3"],
+                })).unwrap(),
+            },
+        });
         let deserialized = serde_json::from_value::<ClientEvent>(serialized).unwrap();
         assert_eq!(event, deserialized);
     }

@@ -19,6 +19,7 @@ pub trait Broker: Clone {
 }
 
 pub trait Connection {
+    async fn authenticate(&mut self, user_id: &str, data: impl Serialize) -> Result<(), BoxError>;
     async fn publish(&mut self, channel: &str, msg: impl Serialize) -> Result<(), BoxError>;
     async fn subscribe(&mut self, channel: &str) -> Result<(), BoxError>;
     async fn unsubscribe(&mut self, channel: &str) -> Result<(), BoxError>;
@@ -92,6 +93,13 @@ pub enum AnyConnection {
 }
 
 impl Connection for AnyConnection {
+    async fn authenticate(&mut self, user_id: &str, data: impl Serialize) -> Result<(), BoxError> {
+        match self {
+            Self::Memory(broker) => broker.authenticate(user_id, data).await,
+            Self::Redis(broker) => broker.authenticate(user_id, data).await,
+        }
+    }
+
     async fn publish(&mut self, channel: &str, msg: impl Serialize) -> Result<(), BoxError> {
         match self {
             Self::Memory(broker) => broker.publish(channel, msg).await,

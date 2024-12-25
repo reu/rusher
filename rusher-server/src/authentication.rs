@@ -29,7 +29,7 @@ pub async fn check_signature_middleware(
     next: Next,
 ) -> Result<Response, (StatusCode, Json<Value>)> {
     let signature = sign_request(secret.as_bytes(), &req).map_err(|err| match err {
-        SignatureError::InvalidUrl => (
+        SignatureError::InvalidData => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "ok": false, "error": "Invalid request" })),
         ),
