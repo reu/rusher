@@ -114,18 +114,22 @@ impl<'de> Deserialize<'de> for ChannelName {
     }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(from = "ClientEventJson")]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "ClientEventJson", tag = "event", content = "data")]
 pub enum ClientEvent {
+    #[serde(rename = "pusher:subscribe")]
     Subscribe {
         channel: ChannelName,
         auth: Option<String>,
         channel_data: Option<serde_json::Value>,
     },
+    #[serde(rename = "pusher:unsubscribe")]
     Unsubscribe {
         channel: ChannelName,
     },
+    #[serde(rename = "pusher:ping")]
     Ping,
+    #[serde(untagged)]
     ChannelEvent {
         event: String,
         channel: ChannelName,
