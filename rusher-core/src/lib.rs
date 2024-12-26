@@ -301,6 +301,50 @@ pub enum ServerEvent {
     ChannelEvent(CustomEvent),
 }
 
+impl ServerEvent {
+    pub fn signin_succeeded(user_data: UserData) -> Self {
+        Self::SigninSucceeded {
+            data: SigninInformation { user_data },
+        }
+    }
+
+    pub fn subscription_succeeded(channel: impl Into<ChannelName>) -> Self {
+        Self::SubscriptionSucceeded {
+            channel: channel.into(),
+            data: None,
+        }
+    }
+
+    pub fn custom_event(
+        event: impl Into<String>,
+        channel: impl Into<ChannelName>,
+        data: impl Into<serde_json::Value>,
+        user_id: impl Into<Option<String>>,
+    ) -> Self {
+        Self::ChannelEvent(CustomEvent {
+            event: event.into(),
+            channel: channel.into(),
+            data: data.into(),
+            user_id: user_id.into(),
+        })
+    }
+
+    pub fn invalid_signature_error() -> Self {
+        Self::error("Invalid signature", 409)
+    }
+
+    pub fn authentication_error(message: impl Into<String>) -> Self {
+        Self::error(message, 409)
+    }
+
+    pub fn error(message: impl Into<String>, code: impl Into<Option<u16>>) -> Self {
+        Self::Error {
+            message: message.into(),
+            code: code.into(),
+        }
+    }
+}
+
 impl From<ServerEventJson> for ServerEvent {
     fn from(json: ServerEventJson) -> Self {
         use PusherServerEvent::*;
