@@ -3,7 +3,7 @@ use std::{borrow::Borrow, collections::HashSet, mem, sync::Arc};
 use fred::{
     clients::RedisClient,
     interfaces::{ClientLike, EventInterface, HashesInterface, PubsubInterface},
-    types::{Message as RedisMessage, RedisConfig},
+    types::{Message as RedisMessage, PerformanceConfig, RedisConfig},
 };
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::sync::broadcast::{error::TryRecvError, Receiver as RedisReceiver};
@@ -48,7 +48,15 @@ impl RedisBroker {
     }
 
     pub async fn new_connection_pair(url: &str) -> Result<(RedisClient, RedisClient), BoxError> {
-        let publisher = RedisClient::new(RedisConfig::from_url(url)?, None, None, None);
+        let publisher = RedisClient::new(
+            RedisConfig::from_url(url)?,
+            Some(PerformanceConfig {
+                broadcast_channel_capacity: 1024,
+                ..Default::default()
+            }),
+            None,
+            None,
+        );
         let subscriber = publisher.clone_new();
         publisher.init().await?;
         subscriber.init().await?;
