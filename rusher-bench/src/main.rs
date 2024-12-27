@@ -36,7 +36,7 @@ async fn main() {
     let url = env::var("URL")
         .ok()
         .and_then(|url| url.parse::<Uri>().ok())
-        .unwrap_or(Uri::from_static("ws://localhost:4444/app/test"));
+        .unwrap_or(Uri::from_static("ws://localhost:8778/app/test"));
 
     let channel = "benchmark".parse::<ChannelName>().unwrap();
 
