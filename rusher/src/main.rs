@@ -3,7 +3,9 @@ use std::{
     env,
 };
 
-use rusher_pubsub::{redis::RedisBroker, AnyBroker};
+use futures::{Stream, StreamExt};
+use rusher_core::ServerEvent;
+use rusher_pubsub::{redis::RedisBroker, AnyBroker, Broker};
 use rusher_server::App;
 use tokio::net::TcpListener;
 
@@ -50,7 +52,17 @@ async fn main() {
             .collect(),
     };
 
+    for (app, broker) in app_repo.iter() {
+        tokio::spawn(send_webhooks(app.clone(), broker.all_messages()));
+    }
+
     rusher_server::serve(listener, rusher_server::app(app_repo))
         .await
         .unwrap();
+}
+
+async fn send_webhooks(_app: App, mut messages: impl Stream<Item = ServerEvent> + Unpin) {
+    while let Some(_msg) = messages.next().await {
+        // TODO: send webhook
+    }
 }

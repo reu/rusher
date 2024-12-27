@@ -4,6 +4,8 @@ use std::{
     sync::Arc,
 };
 
+use async_stream::stream;
+use futures::{stream::BoxStream, StreamExt};
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::sync::{
     broadcast::{
@@ -103,6 +105,24 @@ impl Broker for MemoryBroker {
         self.broadcast
             .send((channel.to_owned(), serde_json::to_vec(&msg)?))?;
         Ok(())
+    }
+
+    fn all_messages<T: DeserializeOwned + Send + 'static>(&self) -> BoxStream<'static, T> {
+        let mut msgs = self.broadcast.clone().subscribe();
+        stream! {
+            loop {
+                match msgs.try_recv() {
+                    Ok((_, msg)) => {
+                        if let Ok(msg) = serde_json::from_slice(&msg) {
+                            yield msg
+                        }
+                    }
+                    Err(TryRecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                }
+            }
+        }
+        .boxed()
     }
 }
 

@@ -1,10 +1,12 @@
 use std::{borrow::Borrow, collections::HashSet, mem, sync::Arc};
 
+use async_stream::stream;
 use fred::{
     clients::RedisClient,
     interfaces::{ClientLike, EventInterface, HashesInterface, PubsubInterface},
     types::{Message as RedisMessage, PerformanceConfig, RedisConfig},
 };
+use futures::{stream::BoxStream, StreamExt};
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::sync::broadcast::{error::TryRecvError, Receiver as RedisReceiver};
 
@@ -103,6 +105,24 @@ impl Broker for RedisBroker {
             )
             .await?;
         Ok(())
+    }
+
+    fn all_messages<T: DeserializeOwned + Send + 'static>(&self) -> BoxStream<'static, T> {
+        let mut msgs = self.subscriber.message_rx();
+        stream! {
+            loop {
+                match msgs.recv().await {
+                    Ok(msg) if msg.value.is_string() => {
+                        if let Ok(msg) = serde_json::from_str(&msg.value.as_str().unwrap()) {
+                            yield msg
+                        }
+                    }
+                    Ok(_) => continue,
+                    Err(_) => break,
+                }
+            }
+        }
+        .boxed()
     }
 }
 

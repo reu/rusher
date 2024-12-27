@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.82"
+futures = { version = "0.3.30", default-features = false, features = ["alloc", "async-await", "std"] }
+rusher-core = { version = "0.0.0", path = "../rusher-core" }
 rusher-pubsub = { path = "../rusher-pubsub" }
 rusher-server = { path = "../rusher-server" }
 tokio = { version = "1.37.0", features = ["full"] }

@@ -3,6 +3,7 @@
 use std::{collections::HashSet, error::Error};
 
 use fred::prelude::RedisClient;
+use futures::stream::BoxStream;
 use serde::{de::DeserializeOwned, Serialize};
 
 pub mod memory;
@@ -16,6 +17,7 @@ pub trait Broker: Clone {
     async fn subscribers_count(&self, channel: &str) -> usize;
     async fn subscriptions(&self) -> HashSet<(String, usize)>;
     async fn publish(&self, channel: &str, msg: impl Serialize) -> Result<(), BoxError>;
+    fn all_messages<T: DeserializeOwned + Send + 'static>(&self) -> BoxStream<'static, T>;
 }
 
 pub trait Connection {
@@ -83,6 +85,13 @@ impl Broker for AnyBroker {
         match self {
             Self::Memory(broker) => broker.publish(channel, msg).await,
             Self::Redis(broker) => broker.publish(channel, msg).await,
+        }
+    }
+
+    fn all_messages<T: DeserializeOwned + Send + 'static>(&self) -> BoxStream<'static, T> {
+        match self {
+            Self::Memory(broker) => broker.all_messages(),
+            Self::Redis(broker) => broker.all_messages(),
         }
     }
 }
