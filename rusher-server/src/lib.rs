@@ -28,6 +28,8 @@ mod authentication;
 mod websocket;
 
 pub use axum::serve;
+use tower_http::trace::{DefaultOnResponse, TraceLayer};
+use tracing::{debug, error, info_span, Instrument, Level};
 use websocket::ConnectionProtocol;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -96,6 +98,17 @@ pub fn app(app_repo: impl IntoAppRepository) -> Router {
         .route("/apps/:app/events", post(publish))
         .route_layer(middleware::from_fn(check_signature_middleware))
         .route("/app/:app", any(handle_ws))
+        .layer(
+            TraceLayer::new_for_http()
+                .on_response(DefaultOnResponse::default().level(Level::INFO))
+                .make_span_with(|request: &Request<_>| {
+                    info_span!(
+                        "request",
+                        uri = ?request.uri(),
+                        method = ?request.method(),
+                    )
+                }),
+        )
         .route_layer(middleware::from_fn_with_state(
             Arc::new(app_repo) as Arc<dyn AppRepository>,
             broker_middleware,
@@ -114,10 +127,12 @@ async fn broker_middleware(
         app_repo.broker_for_app(&app_id).await,
     ) {
         (Some(secret), Some(broker)) => {
-            request.extensions_mut().insert(app_id);
+            request.extensions_mut().insert(app_id.clone());
             request.extensions_mut().insert(secret);
             request.extensions_mut().insert(broker);
-            next.run(request).await
+            next.run(request)
+                .instrument(info_span!("app_request", app_id = app_id.0))
+                .await
         }
         _ => Response::builder()
             .status(StatusCode::NOT_FOUND)
@@ -197,6 +212,7 @@ async fn handle_ws(
     match broker.connect().await {
         Ok(mut connection) => Ok(ws.on_upgrade(move |ws| async move {
             let socket_id: SocketId = rand::thread_rng().gen();
+            let _span = info_span!("websocket", %app_id, %socket_id);
 
             let (mut write_ws, mut read_ws) = ws.split();
             let (tx, mut rx) = mpsc::channel(64);
@@ -210,24 +226,25 @@ async fn handle_ws(
                     }
                 }
                 anyhow::Ok(())
-            };
+            }.instrument(info_span!("websocket_connection_write", %app_id, %socket_id));
 
             let mut proto = ConnectionProtocol {
                 tx: tx.clone(),
-                app_id,
+                app_id: app_id.clone(),
                 secret,
                 socket_id: socket_id.clone(),
                 current_user_id: None,
             };
 
+            let connection_established = ServerEvent::ConnectionEstablished {
+                data: ConnectionInfo {
+                    socket_id: socket_id.clone(),
+                    activity_timeout: 120,
+                },
+            };
+
             let read_messages = async move {
-                tx.send(ServerEvent::ConnectionEstablished {
-                    data: ConnectionInfo {
-                        socket_id,
-                        activity_timeout: 120,
-                    },
-                })
-                .await?;
+                tx.send(connection_established).await?;
 
                 loop {
                     tokio::select! {
@@ -240,11 +257,15 @@ async fn handle_ws(
                                 Message::Text(text) => {
                                     match serde_json::from_str(&text) {
                                         Ok(msg) => {
-                                            if let Err(err) = proto.handle_message(&mut connection, msg).await {
-                                                bail!(err)
+                                            if let Err(error) = proto.handle_message(&mut connection, msg).await {
+                                                error!(%error);
+                                                bail!(error)
                                             }
                                         },
-                                        Err(_) => continue,
+                                        Err(error) => {
+                                            debug!(msg = "could not decode message", %text, %error);
+                                            continue
+                                        },
                                     };
                                 }
                                 _ => continue,
@@ -255,14 +276,14 @@ async fn handle_ws(
                     }
                 }
                 anyhow::Ok(())
-            };
+            }.instrument(info_span!("websocket_connection_read", %app_id, %socket_id));
 
             tokio::select! {
-                _ = write_messages => eprintln!("Writer finished"),
-                _ = read_messages => eprintln!("Reader finished"),
+                _ = write_messages => debug!("Writer finished"),
+                _ = read_messages => debug!("Reader finished"),
             };
 
-            eprintln!("Client disconnected");
+            debug!("Client disconnected");
         })),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }

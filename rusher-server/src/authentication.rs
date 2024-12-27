@@ -10,6 +10,7 @@ use futures::TryStreamExt;
 use rusher_core::signature::{sign_request, SignatureError};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tracing::{info_span, Instrument};
 
 use crate::AppSecret;
 
@@ -71,9 +72,10 @@ pub async fn check_signature_middleware(
     }
 
     match hex::decode(auth_signature) {
-        Ok(ref sent_signature) if signature.verify(sent_signature) => {
-            Ok(next.run(Request::from_parts(parts, Body::from(body))).await)
-        }
+        Ok(ref sent_signature) if signature.verify(sent_signature) => Ok(next
+            .run(Request::from_parts(parts, Body::from(body)))
+            .instrument(info_span!("authenticated_request"))
+            .await),
         _ => Err((
             StatusCode::UNAUTHORIZED,
             Json(json!({ "ok": false, "error": "Invalid auth_signature" })),

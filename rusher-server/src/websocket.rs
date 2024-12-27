@@ -6,7 +6,9 @@ use rusher_core::{
 };
 use rusher_pubsub::Connection;
 use tokio::sync::mpsc::Sender;
+use tracing::{debug, info_span, instrument, Instrument};
 
+#[derive(Debug)]
 pub struct ConnectionProtocol {
     pub tx: Sender<ServerEvent>,
     pub socket_id: SocketId,
@@ -16,6 +18,7 @@ pub struct ConnectionProtocol {
 }
 
 impl ConnectionProtocol {
+    #[instrument(skip(self, connection), fields(app_id = %self.app_id, user_id = self.current_user_id))]
     pub async fn handle_message(
         &mut self,
         connection: &mut impl Connection,
@@ -58,6 +61,8 @@ impl ConnectionProtocol {
             }
 
             ClientEvent::Subscribe { channel, auth, .. } => {
+                let channel_span = info_span!("channel", %channel);
+
                 match channel {
                     ref channel @ ChannelName::Private(_) => {
                         let (sent_id, auth) = auth
@@ -96,10 +101,16 @@ impl ConnectionProtocol {
                     _ => {}
                 };
 
-                connection.subscribe(channel.as_ref()).await?;
+                connection
+                    .subscribe(channel.as_ref())
+                    .instrument(channel_span.clone())
+                    .await?;
 
                 tx.send(ServerEvent::subscription_succeeded(channel))
+                    .instrument(channel_span.clone())
                     .await?;
+
+                debug!("subscribed");
 
                 Ok(())
             }

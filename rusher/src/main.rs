@@ -8,9 +8,25 @@ use rusher_core::ServerEvent;
 use rusher_pubsub::{redis::RedisBroker, AnyBroker, Broker};
 use rusher_server::App;
 use tokio::net::TcpListener;
+use tracing::Level;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 #[tokio::main]
 async fn main() {
+    let log_level = env::var("LOG_LEVEL")
+        .ok()
+        .and_then(|level| level.parse().ok())
+        .unwrap_or(Level::DEBUG);
+
+    let log_format = env::var("LOG_FORMAT")
+        .ok()
+        .and_then(|f| {
+            f.to_lowercase()
+                .contains("json")
+                .then(|| tracing_subscriber::fmt::layer().json().boxed())
+        })
+        .unwrap_or_else(|| tracing_subscriber::fmt::layer().pretty().boxed());
+
     let port = env::var("PORT")
         .ok()
         .and_then(|port| port.parse::<u16>().ok())
@@ -26,6 +42,16 @@ async fn main() {
                 .collect::<HashSet<_>>()
         })
         .unwrap_or_default();
+
+    tracing_subscriber::registry()
+        .with(log_format)
+        .with(
+            tracing_subscriber::filter::Targets::new()
+                .with_target("tower_http", log_level)
+                .with_target("rusher_server", log_level)
+                .with_default(Level::INFO),
+        )
+        .init();
 
     let listener = TcpListener::bind(("0.0.0.0", port)).await.unwrap();
 
