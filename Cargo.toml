@@ -12,3 +12,17 @@ description = "Pusher compatible pubsub service"
 homepage = "https://github.com/reu/rusher"
 categories = ["asynchronous", "network-programming", "web-programming::websocket"]
 keywords = ["pusher", "pubsub"]
+
+[workspace.dependencies]
+anyhow = "1.0.82"
+futures = { version = "0.3.30", default-features = false, features = ["alloc", "async-await", "std"] }
+http = "1.2.0"
+rand = "0.8.5"
+rusher = { version = "0.1.0", path = "rusher" }
+rusher-core = { version = "0.1.0", path = "rusher-core" }
+rusher-pubsub = { version = "0.1.0", path = "rusher-pubsub" }
+rusher-server = { version = "0.1.0", path = "rusher-server" }
+serde = "1.0.197"
+serde_json = "1.0.115"
+tokio = "1.37.0"
+tracing = "0.1.41"

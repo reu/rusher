@@ -5,7 +5,6 @@ use std::{
         Arc,
     },
     time::{Duration, Instant},
-    usize,
 };
 
 use futures::{SinkExt, StreamExt};
@@ -127,13 +126,8 @@ async fn main() {
                 });
             }
 
-            loop {
-                match handles.join_next().await {
-                    Some(_) => {
-                        recv_tx.send((Event::Disconnect, Instant::now())).ok();
-                    }
-                    _ => break,
-                }
+            while handles.join_next().await.is_some() {
+                recv_tx.send((Event::Disconnect, Instant::now())).ok();
             }
         }
     });
@@ -166,13 +160,9 @@ async fn main() {
                     }
                 });
             }
-            loop {
-                match handles.join_next().await {
-                    Some(_) => {
-                        sent_tx.send((Event::Disconnect, Instant::now())).ok();
-                    }
-                    _ => break,
-                }
+
+            while handles.join_next().await.is_some() {
+                sent_tx.send((Event::Disconnect, Instant::now())).ok();
             }
         }
     });
