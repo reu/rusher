@@ -2,3 +2,13 @@
 resolver = "2"
 members = ["rusher", "rusher-*"]
 default-members = ["rusher"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Rodrigo Navarro <rnavarro@rnavarro.com.br>"]
+license = "MIT"
+description = "Pusher compatible pubsub service"
+homepage = "https://github.com/reu/rusher"
+categories = ["asynchronous", "network-programming", "web-programming::websocket"]
+keywords = ["pusher", "pubsub"]

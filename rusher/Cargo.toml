@@ -1,13 +1,19 @@
 [package]
 name = "rusher"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description.workspace = true
+homepage.workspace = true
+categories.workspace = true
+keywords.workspace = true
 
 [dependencies]
 anyhow = "1.0.82"
 clap = { version = "4.5.23", features = ["cargo", "derive", "env"] }
 futures = { version = "0.3.30", default-features = false, features = ["alloc", "async-await", "std"] }
-rusher-core = { version = "0.0.0", path = "../rusher-core" }
+rusher-core = { path = "../rusher-core" }
 rusher-pubsub = { path = "../rusher-pubsub" }
 rusher-server = { path = "../rusher-server" }
 serde = { version = "1.0.216", features = ["derive"] }

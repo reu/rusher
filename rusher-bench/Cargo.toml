@@ -1,7 +1,13 @@
 [package]
 name = "rusher-bench"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description.workspace = true
+homepage.workspace = true
+categories.workspace = true
+keywords.workspace = true
 
 [dependencies]
 futures = "0.3.30"
